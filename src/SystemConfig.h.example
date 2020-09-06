@@ -1,0 +1,20 @@
+#ifndef SYSTEM_CONFIG_H
+#define SYSTEM_CONFIG_H
+
+#define WIFI_SSID "yourssid"
+#define WIFI_PSK "yourpassword"
+
+#define HTTP_USERNAME "admin"
+#define HTTP_PASSWORD "yourpassword"
+
+#define VALVE_OPEN true
+#define VALVE_CLOSED false
+
+// Mosfets
+#define VALVE_OUTPUT_ENABLED HIGH
+#define VALVE_OUTPUT_DISABLED LOW
+
+// Relais
+// #define VALVE_OUTPUT_ENABLED LOW
+// #define VALVE_OUTPUT_DISABLED HIGH
+#endif
