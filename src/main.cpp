@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WebServer.h>
@@ -5,7 +6,13 @@
 #include "time.h"
 #include <ArduinoOTA.h>
 
+#include "classes/Soil.h"
+#include "classes/Valve.h"
+#include "classes/WateringPlan.h"
+
+#include "settings.h"
 #include "SystemConfig.h"
+
 const char *ssid = WIFI_SSID;
 const char *password = WIFI_PSK;
 
@@ -19,8 +26,8 @@ const int daylightOffset_sec = 3600;
 
 //____________________
 #include <Wire.h>
-#include <Adafruit_GFX.h>    // Core graphics library
-#include <Adafruit_ST7735.h> // Hardware-specific library for ST7735
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
 #include <SPI.h>
 
 #define TFT_CS 0
@@ -28,243 +35,6 @@ const int daylightOffset_sec = 3600;
 #define TFT_DC 2 // A0
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 //____________________
-
-#define HISTORY_SLOTS 288
-
-class Soil
-{
-private:
-  uint8_t pin;
-  String name;
-  int adcDry;
-  int adcWet;
-
-  int adcRaw;
-  double adcSmoothed = 0;
-  double moistureHistory[HISTORY_SLOTS];
-
-public:
-  Soil(uint8_t _pin, String _name, int _adcDry, int _adcWet)
-  {
-    pin = _pin;
-    name = _name;
-    adcDry = _adcDry;
-    adcWet = _adcWet;
-  }
-
-  double getMoisture()
-  {
-    return map(adcSmoothed, adcDry, adcWet, 0, 10000) / 100.0;
-  }
-
-  int getAdcRaw()
-  {
-    return adcRaw;
-  }
-
-  double getAdcSmoothed()
-  {
-    return adcSmoothed;
-  }
-
-  void addHistoricState()
-  {
-    for (int i = 0; i < HISTORY_SLOTS - 1; i++)
-    {
-      moistureHistory[i] = moistureHistory[i + 1];
-    }
-    moistureHistory[HISTORY_SLOTS - 1] = getMoisture();
-  }
-
-  double getHistoricState(int slot)
-  {
-    return moistureHistory[slot];
-  }
-
-  String getName()
-  {
-    return name;
-  }
-
-  void readAdc()
-  {
-    pinMode(pin, INPUT);
-    adcRaw = analogRead(pin);
-
-    if (adcSmoothed == 0)
-      adcSmoothed = adcRaw;
-
-    double factor = 0.005;
-    adcSmoothed = adcSmoothed * (1.0 - factor) + adcRaw * factor;
-  }
-};
-
-class Valve
-{
-private:
-  uint8_t pin;
-  String name;
-
-  bool wasOpenSinceLastHistoricState = false;
-  bool valveStateHistory[HISTORY_SLOTS];
-
-public:
-  Valve(uint8_t _pin, String _name)
-  {
-    pin = _pin;
-    name = _name;
-  }
-
-  void setState(bool state)
-  {
-    if (state == VALVE_OPEN)
-      wasOpenSinceLastHistoricState = true;
-
-    Serial.print("Set valve: valve=");
-    Serial.print(pin);
-    Serial.print("; state=");
-    Serial.println(state == VALVE_OPEN ? "open" : "close");
-
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, state == VALVE_OPEN ? VALVE_OUTPUT_ENABLED : VALVE_OUTPUT_DISABLED);
-  }
-
-  bool getState()
-  {
-    return (digitalRead(pin) == VALVE_OUTPUT_ENABLED ? VALVE_OPEN : VALVE_CLOSED);
-  }
-
-  void addHistoricState()
-  {
-    for (int i = 0; i < HISTORY_SLOTS - 1; i++)
-      valveStateHistory[i] = valveStateHistory[i + 1];
-
-    valveStateHistory[HISTORY_SLOTS - 1] = wasOpenSinceLastHistoricState;
-    wasOpenSinceLastHistoricState = getState() == VALVE_OPEN ? true : false;
-  }
-
-  bool getHistoricState(int slot)
-  {
-    return valveStateHistory[slot];
-  }
-
-  String getName()
-  {
-    return name;
-  }
-};
-
-class WateringPlan
-{
-private:
-  Soil *soil;
-  Valve *valve;
-  double moistureTarget;
-  int wateringDurationMS;
-  int wateringDeadtimeMS;
-
-  unsigned long millisLastWatering = 0;
-  int wateringCount = 0;
-
-public:
-  WateringPlan(Soil *_soil, Valve *_valve, double _moistureTarget, int _wateringDurationMS, int _wateringDeadtimeMS)
-  {
-    soil = _soil;
-    valve = _valve;
-    moistureTarget = _moistureTarget;
-    wateringDurationMS = _wateringDurationMS;
-    wateringDeadtimeMS = _wateringDeadtimeMS;
-  }
-
-  void loop()
-  {
-    unsigned long currentMillis = millis();
-    if (currentMillis - millisLastWatering >= wateringDeadtimeMS)
-    {
-      if (soil->getMoisture() < moistureTarget)
-      {
-        Serial.print("Watering ");
-        Serial.print(valve->getName());
-        Serial.print("... ");
-        wateringCount++;
-        valve->setState(VALVE_OPEN);
-        delay(wateringDurationMS);
-        valve->setState(VALVE_CLOSED);
-        Serial.println("Done.");
-
-        millisLastWatering = currentMillis;
-      }
-    }
-  }
-
-  Soil getSoil()
-  {
-    return *soil;
-  }
-
-  Valve getValve()
-  {
-    return *valve;
-  }
-
-  unsigned long getMSsinceLastWatering()
-  {
-    return millis() - millisLastWatering;
-  }
-
-  double getMoistureTarget()
-  {
-    return moistureTarget;
-  }
-};
-
-// // ===== Garten =====
-// #define SOIL_COUNT 3
-// Soil soils[SOIL_COUNT] = {
-//     Soil(34, "Folientunnel", 3454, 1600),
-//     Soil(35, "-", 3664, 1440),
-//     Soil(32, "Wall", 3664, 1440),
-//     // Soil(33, "-", 3664, 1440),
-//     // Soil(25, "-", 3664, 1440),
-//     // Soil(26, "-", 3664, 1440),
-// };
-
-// #define VALVE_COUNT 6
-// Valve valves[VALVE_COUNT] = {
-//     Valve(27, "Folientunnel"),
-//     Valve(14, "Teegarten"),
-//     Valve(12, "Wall"),
-//     Valve(13, "Freiland 1"),
-//     Valve(19, "Freiland 2"),
-//     Valve(5, "Freiland 3"),
-// };
-
-// #define WATERING_DEAD_TIME_MS 1000 * 60 * 60 * 3 // 3 Stunden
-
-// #define WATERINGPLAN_COUNT 0
-// WateringPlan wateringPlans[WATERINGPLAN_COUNT] = {
-// };
-
-// // ===== Garten Ende =====
-
-// ===== Basilikum =====
-#define SOIL_COUNT 1
-Soil soils[SOIL_COUNT] = {
-    Soil(34, "Basilikum", 3395, 1440),
-};
-
-#define VALVE_COUNT 1
-Valve valves[VALVE_COUNT] = {
-    Valve(19, "Basilikum"),
-};
-
-#define WATERING_DEAD_TIME_MS 1000 * 60 * 60 * 3 // 3 Stunden
-
-#define WATERINGPLAN_COUNT 1
-WateringPlan wateringPlans[WATERINGPLAN_COUNT] = {
-    WateringPlan(&soils[0], &valves[0], 40, 20000, WATERING_DEAD_TIME_MS),
-};
-// ===== Basilikum Ende =====
 
 WebServer server(80);
 
@@ -277,8 +47,8 @@ void drawGraph()
 
   String out = "";
   char temp[500];
-  out += "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" width=\"290\" height=\"200\">\n";
-  out += "<rect width=\"290\" height=\"200\" fill=\"rgb(250, 230, 210)\" stroke-width=\"1\" stroke=\"rgb(0, 0, 0)\" />\n";
+  out = out + "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" width=\"" + (xPixel + 2) + "\" height=\"" + yPixel + "\">\n";
+  out = out + "<rect width=\"" + (xPixel + 2) + "\" height=\"" + yPixel + "\" fill=\"rgb(250, 230, 210)\" stroke-width=\"1\" stroke=\"rgb(0, 0, 0)\" />\n";
 
   out += "<g stroke=\"blue\">\n";
   for (int x = 1; x < xPixel - 1; x++)
@@ -307,8 +77,8 @@ void drawGraph()
   server.send(200, "image/svg+xml", out);
 }
 
-String imgWater = "data:image/png;base64,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";
-String imgStop = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAAC/klEQVRYw7WXy28TVxSHvzOPBkorVd2RNRLEYBWklgUKQiXiIQhJH4uWh9SKVf8soJBFhERbVSVAAIEUCSQEEi52F+2miwhYBjuOfefew8IzY7v1YzyOz2xmRvfO9zu/c+deHSFDrBfDL4E9jBal6ZJ5MmyQZIBfBK4C/ogCGsDX0yVzO7eA9WJ4AbgG+P6hs3iffJqJbN+8xpXvZRIhWeDh/E98vLgw3K441Dk2lpaIHi0NFSF94OeBnwE/PHWZj+bPgLrRCqDwbnmZaO3mQBHSA/49cB3ww+MX2XX6JIKSJ9Qp7279gn36a18R0g8ezH7LrhNzrVTGCVWqv/2Ofb7SU4R0wL+L4UFw+CwfHj82PjwJp9RW7mJfPkhEfDNdMn+kArrgh+bYefTI9sE71sTm6kNsZa1LhKwXw2PAKhD4hVl2HvkCVAd9p+8i0gzlqD9ew/79DGmJOBoo7AUCb/c+pj7bh6tuZPtYzpj6/CD11/+i1bdTwJ4gBe34AFvbyGxnhle9nfI9NAzT8UHitms2cLVqpsy139OgySItEZ6HsxGqLVGBJvNMA7tZBSWHiOGROuAJag0JN3DxjZoGUqvlh+lwusROWBulz4GNJ4ppYjdrY2WZyQUR1Eap02kJJGpCvT4wQfmPKBkgUvouBcE523YgOWLURrBVH8llzVEREUHVpmPSvwAb4RqNCXjefasI6try2vuAc2izyaRDhNbRrq37LgGYyQtQQLT9EHTu0y6yk8m6z7vkL/gHcIAX65hI1h37UHo4An95hbK5D/wAOElqhG77BdoFV5ifKZsXqTvlQnhJ4QrgK+C22QpfUlRdYL5QNg9IbAcolM114EfACuCJbBu841t14FwC77k+XhVajYhq7IQbzwnf68hcWNhfNqtDd8w/Z9rdkCrYnOXwPUkAW8DCgYq59z93ek08UDE34oVpRbrqlxe+2As+tDUrzbS7I833328Bi8WKuZu7Oe0UMaIJW8BXxYq5M1Z3HIvI056/LFbM02GD3gOGDYfylQPXuQAAAABJRU5ErkJggg==";
+const String imgWater = "data:image/png;base64,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";
+const String imgStop = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAAC/klEQVRYw7WXy28TVxSHvzOPBkorVd2RNRLEYBWklgUKQiXiIQhJH4uWh9SKVf8soJBFhERbVSVAAIEUCSQEEi52F+2miwhYBjuOfefew8IzY7v1YzyOz2xmRvfO9zu/c+deHSFDrBfDL4E9jBal6ZJ5MmyQZIBfBK4C/ogCGsDX0yVzO7eA9WJ4AbgG+P6hs3iffJqJbN+8xpXvZRIhWeDh/E98vLgw3K441Dk2lpaIHi0NFSF94OeBnwE/PHWZj+bPgLrRCqDwbnmZaO3mQBHSA/49cB3ww+MX2XX6JIKSJ9Qp7279gn36a18R0g8ezH7LrhNzrVTGCVWqv/2Ofb7SU4R0wL+L4UFw+CwfHj82PjwJp9RW7mJfPkhEfDNdMn+kArrgh+bYefTI9sE71sTm6kNsZa1LhKwXw2PAKhD4hVl2HvkCVAd9p+8i0gzlqD9ew/79DGmJOBoo7AUCb/c+pj7bh6tuZPtYzpj6/CD11/+i1bdTwJ4gBe34AFvbyGxnhle9nfI9NAzT8UHitms2cLVqpsy139OgySItEZ6HsxGqLVGBJvNMA7tZBSWHiOGROuAJag0JN3DxjZoGUqvlh+lwusROWBulz4GNJ4ppYjdrY2WZyQUR1Eap02kJJGpCvT4wQfmPKBkgUvouBcE523YgOWLURrBVH8llzVEREUHVpmPSvwAb4RqNCXjefasI6try2vuAc2izyaRDhNbRrq37LgGYyQtQQLT9EHTu0y6yk8m6z7vkL/gHcIAX65hI1h37UHo4An95hbK5D/wAOElqhG77BdoFV5ifKZsXqTvlQnhJ4QrgK+C22QpfUlRdYL5QNg9IbAcolM114EfACuCJbBu841t14FwC77k+XhVajYhq7IQbzwnf68hcWNhfNqtDd8w/Z9rdkCrYnOXwPUkAW8DCgYq59z93ek08UDE34oVpRbrqlxe+2As+tDUrzbS7I833328Bi8WKuZu7Oe0UMaIJW8BXxYq5M1Z3HIvI056/LFbM02GD3gOGDYfylQPXuQAAAABJRU5ErkJggg==";
 
 void handleRoot()
 {
@@ -383,11 +153,11 @@ void handleRoot()
     message = message + "</h3><p><img src=\"/graph.svg?id=" + i + "\" /></p>";
   }
 
-  message = message + "<h2>Debug</h2>";
-  message = message + "<ul>";
-  for (int i = 0; i < HISTORY_SLOTS; i++)
-    message = message + "<li>" + soils[0].getHistoricState(i) + "</li>";
-  message = message + "</ul>";
+  // message = message + "<h2>Debug</h2>";
+  // message = message + "<ul>";
+  // for (int i = 0; i < HISTORY_SLOTS; i++)
+  //   message = message + "<li>" + soils[0].getHistoricState(i) + "</li>";
+  // message = message + "</ul>";
 
   message += "</body>\
 </html>";
@@ -441,8 +211,10 @@ void checkWifi()
 
       if (wifi_retry > 10)
       {
+        // TODO sinnvollen Ausweg finden
         Serial.println("\nReboot");
-        ESP.restart();
+        // ESP.restart();
+        return;
       }
 
       Serial.println("WiFi not connected. Try to reconnect...");
@@ -480,7 +252,9 @@ void checkWifi()
 
 int getYFor(double percent)
 {
-  return tft.height() - map(percent * 100.0, 5000, 10000, 0, 100);
+  const int lowerLimit = 0;
+  const int upperLimit = 100;
+  return tft.height() - map(percent * 100.0, lowerLimit * 100, upperLimit * 100, 0, 100);
 }
 
 void printLocalTime()
